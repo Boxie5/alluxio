@@ -38,6 +38,7 @@ import alluxio.wire.BlockLocation;
 import alluxio.wire.TieredIdentity;
 import alluxio.wire.WorkerInfo;
 import alluxio.wire.WorkerNetAddress;
+import alluxio.wire.WorkerNetAddress.WorkerRole;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -168,13 +169,14 @@ public final class AlluxioBlockStore {
    */
   public BlockInStream getInStream(long blockId, InStreamOptions options,
       Map<WorkerNetAddress, Long> failedWorkers) throws IOException {
+    LOG.info("get in stream, blockId: {}, options: {}", blockId, options);
     /*try (CloseableResource<BlockMasterClient> masterClientResource =
              mContext.acquireBlockMasterClientResource()) {
       info = masterClientResource.get().getBlockInfo(blockId);
-      
     }*/
     BlockInfo info = getInfo(blockId);
     List<BlockLocation> locations = info.getLocations();
+    LOG.info("blockId in getInStream: {}, block info: {}", blockId, info);
 
     //qiniu
     Set<WorkerNetAddress> cachedWorkers = MetaCache.getWorkerInfoList().stream().map(WorkerInfo::getAddress).collect(toSet());
@@ -187,7 +189,13 @@ public final class AlluxioBlockStore {
     Set<WorkerNetAddress> workerPool;
     if (options.getStatus().isPersisted()) {
       blockWorkerInfo = getEligibleWorkers();
-      workerPool = blockWorkerInfo.stream().map(BlockWorkerInfo::getNetAddress).collect(toSet());
+      workerPool = blockWorkerInfo
+        .stream()
+        .map(BlockWorkerInfo::getNetAddress)
+        .filter(w -> ! (w.getRole() != null && w.getRole().equals(WorkerNetAddress.WorkerRole.WRITE)))
+        .collect(toSet());
+      LOG.info("workerPool in 1 getInStream: {}", workerPool);
+      // TODO fix me
       if (readerExHosts.size() > 0) {
           Set<WorkerNetAddress> subPool = workerPool.stream()
               .filter(w -> blockWorkers.contains(w) || !readerExHosts.contains(w.getHost() + ":" + w.getDataPort()))
@@ -197,6 +205,7 @@ public final class AlluxioBlockStore {
     } else {
       workerPool = locations.stream().map(BlockLocation::getWorkerAddress).collect(toSet());
     }
+    LOG.info("workerPool in 2 getInStream: {}", workerPool);
     if (workerPool.isEmpty()) {
       MetaCache.invalidateBlockInfoCache(blockId); //qiniu
       throw new NotFoundException(ExceptionMessage.BLOCK_UNAVAILABLE.getMessage(info.getBlockId()));
@@ -239,7 +248,7 @@ public final class AlluxioBlockStore {
       blockWorkerInfo = blockWorkerInfo.stream()
           .filter(workerInfo -> workers.contains(workerInfo.getNetAddress())).collect(toList());
       GetWorkerOptions getWorkerOptions = GetWorkerOptions.defaults().setBlockId(info.getBlockId())
-          .setBlockSize(info.getLength()).setBlockWorkerInfos(blockWorkerInfo);
+          .setBlockSize(info.getLength()).setRole(WorkerRole.READ).setBlockWorkerInfos(blockWorkerInfo);
       dataSource = policy.getWorker(getWorkerOptions);
     }
     if (dataSource == null) {
@@ -276,6 +285,7 @@ public final class AlluxioBlockStore {
    */
   public BlockOutStream getOutStream(long blockId, long blockSize, WorkerNetAddress address,
       OutStreamOptions options) throws IOException {
+    LOG.info("get out stream, blockId: {}, blockSize: {}, options: {}", blockId, blockSize, options);
     if (blockSize == -1) {
       /*
       try (CloseableResource<BlockMasterClient> blockMasterClientResource =
@@ -310,7 +320,7 @@ public final class AlluxioBlockStore {
     WorkerNetAddress address;
     FileWriteLocationPolicy locationPolicy = Preconditions.checkNotNull(options.getLocationPolicy(),
         PreconditionMessage.FILE_WRITE_LOCATION_POLICY_UNSPECIFIED);
-    address = locationPolicy.getWorkerForNextBlock(getEligibleWorkers(), blockSize);
+    address = locationPolicy.getWorkerForNextBlock(getEligibleWorkers(), blockSize, WorkerRole.WRITE);
     if (address == null) {
       throw new UnavailableException(
           ExceptionMessage.NO_SPACE_FOR_BLOCK_ON_WORKER.getMessage(blockSize));
